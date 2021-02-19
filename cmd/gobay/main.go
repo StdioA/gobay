@@ -2,27 +2,29 @@ package main
 
 import (
 	"bytes"
+	"embed"
+	"io/fs"
 	"io/ioutil"
 	"log"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"text/template"
 
 	"github.com/iancoleman/strcase"
-	"github.com/markbates/pkger"
 	"github.com/spf13/cobra"
 )
 
 type _projTemplate struct {
 	content []byte
 	dstPath string
-	mode    os.FileMode
+	mode    fs.FileMode
 }
 
 type _projDir struct {
 	dstPath string
-	mode    os.FileMode
+	mode    fs.FileMode
 }
 
 type _projConfig struct {
@@ -35,6 +37,8 @@ type _projConfig struct {
 }
 
 var (
+	//go:embed templates/*
+	tmplFS        embed.FS
 	projDirs      = []_projDir{}
 	projTemplates = []_projTemplate{}
 	projConfig    = _projConfig{}
@@ -47,12 +51,12 @@ var (
 )
 
 const (
-	TMPLSUFFIX               = ".tmpl"
-	RAW_TMPL_DIR             = "enttmpl"
-	DIRMODE      os.FileMode = os.ModeDir | 0755
-	FILEMODE     os.FileMode = 0644
-	DIRPREFIX                = "/cmd/gobay/templates/"
-	TRIMPREFIX               = "github.com/shanbay/gobay:/cmd/gobay/templates/"
+	TMPLSUFFIX                = ".tmpl"
+	RAW_TMPL_DIR              = "enttmpl"
+	DIRMODE       fs.FileMode = fs.ModeDir | 0755
+	FILEMODE      fs.FileMode = 0644
+	WRITEMODEMASK fs.FileMode = 0200
+	TMPLBASEDIR               = "templates"
 )
 
 func main() {
@@ -107,21 +111,31 @@ func newProject() {
 
 // loadTemplates loads templates and directory structure.
 func loadTemplates() error {
-	if err := pkger.Walk(
-		DIRPREFIX,
-		func(filePath string, info os.FileInfo, err error) error {
-			if err != nil || len(filePath) <= len(TRIMPREFIX) { // dir `templates`
+	if err := fs.WalkDir(
+		tmplFS,
+		TMPLBASEDIR,
+		func(filePath string, info fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			relpath, err := filepath.Rel(TMPLBASEDIR, filePath)
+			if err != nil || relpath == "." {
 				return err
 			}
 			targetPath := path.Join(
 				projConfig.Name,
-				strings.TrimPrefix(filePath, TRIMPREFIX),
+				relpath,
 			)
+			fileInfo, err := info.Info()
+			if err != nil {
+				return err
+			}
+			mode := fileInfo.Mode() | WRITEMODEMASK // Add write permission because embed fs is read-only
 			// dir
 			if info.IsDir() {
 				projDirs = append(projDirs, _projDir{
 					dstPath: targetPath,
-					mode:    info.Mode(),
+					mode:    mode,
 				})
 				return nil
 			}
@@ -131,18 +145,14 @@ func loadTemplates() error {
 				projRawTmpl[filePath] = targetPath
 				return nil
 			}
-			file, err := pkger.Open(filePath)
+			b, err := tmplFS.ReadFile(filePath)
 			if err != nil {
-				return err
-			}
-			b := make([]byte, info.Size())
-			if _, err = file.Read(b); err != nil {
 				return err
 			}
 			projTemplates = append(projTemplates, _projTemplate{
 				content: b,
 				dstPath: strings.TrimSuffix(targetPath, TMPLSUFFIX),
-				mode:    info.Mode(),
+				mode:    mode,
 			})
 			return nil
 		},
@@ -183,7 +193,7 @@ func renderTemplates() {
 // copyTmplFiles copys .tpml file(like ent templates).
 func copyTmplFiles() {
 	for sourcePath, targetPath := range projRawTmpl {
-		file, err := pkger.Open(sourcePath)
+		file, err := tmplFS.Open(sourcePath)
 		if err != nil {
 			panic(err)
 		}
